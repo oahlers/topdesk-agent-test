@@ -1,8 +1,9 @@
 {
   "swagger": "2.0",
   "info": {
-    "title": "TOPdesk Proxy API",
-    "version": "1.0.0"
+    "title": "TOPdesk Live Search v2",
+    "description": "Searches and retrieves live TOPdesk Knowledge Base articles through the Render proxy. Use the search operation for questions about internal guides, Helpdesk, IT support, computers, mobile phones and other TOPdesk Knowledge Base topics. Use the item operation when the user specifies a KI number or Knowledge Item ID.",
+    "version": "2.0.0"
   },
   "host": "topdesk-agent-test.onrender.com",
   "basePath": "/",
@@ -12,15 +13,242 @@
   "produces": [
     "application/json"
   ],
+  "securityDefinitions": {
+    "proxyApiKey": {
+      "type": "apiKey",
+      "name": "X-API-Key",
+      "in": "header",
+      "description": "API key used to authorize requests to the TOPdesk Render proxy."
+    }
+  },
+  "security": [
+    {
+      "proxyApiKey": []
+    }
+  ],
   "paths": {
-    "/": {
+    "/search": {
       "get": {
-        "summary": "Get TOPdesk Knowledge Items",
-        "operationId": "GetKnowledgeItems",
+        "tags": [
+          "TOPdesk Knowledge Base"
+        ],
+        "summary": "Search TOPdesk Knowledge Base",
+        "description": "Searches live TOPdesk Knowledge Items using words supplied in the q parameter. The search covers Knowledge Item number, title, description, content and keywords. Use this operation whenever a user asks for an internal guide, procedure, Helpdesk information, IT support information, computer guidance, mobile phone guidance or another topic that may exist in TOPdesk.",
+        "operationId": "SearchTopdeskKnowledgeItems",
+        "parameters": [
+          {
+            "name": "q",
+            "in": "query",
+            "description": "The most important search words from the user's question. Examples: helpdesk, mobile phone, computer, Excel, screenshot or KI 0009.",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Maximum number of matching Knowledge Items to return.",
+            "required": false,
+            "type": "integer",
+            "format": "int32",
+            "default": 10,
+            "minimum": 1,
+            "maximum": 25
+          }
+        ],
         "responses": {
           "200": {
-            "description": "Success"
+            "description": "Matching TOPdesk Knowledge Items returned successfully.",
+            "schema": {
+              "$ref": "#/definitions/SearchResponse"
+            }
+          },
+          "400": {
+            "description": "The q search parameter was not supplied.",
+            "schema": {
+              "$ref": "#/definitions/ErrorResponse"
+            }
+          },
+          "401": {
+            "description": "The X-API-Key header is missing or invalid.",
+            "schema": {
+              "$ref": "#/definitions/ErrorResponse"
+            }
+          },
+          "500": {
+            "description": "The proxy configuration is incomplete.",
+            "schema": {
+              "$ref": "#/definitions/ErrorResponse"
+            }
+          },
+          "502": {
+            "description": "The proxy could not connect to TOPdesk.",
+            "schema": {
+              "$ref": "#/definitions/ErrorResponse"
+            }
           }
+        }
+      }
+    },
+    "/knowledge-items/{identifier}": {
+      "get": {
+        "tags": [
+          "TOPdesk Knowledge Base"
+        ],
+        "summary": "Get a specific TOPdesk Knowledge Item",
+        "description": "Retrieves one live TOPdesk Knowledge Item by its KI number or UUID. Use this operation when the user names a specific Knowledge Item, for example KI 0009 or KI 0080. Return the title, description and content instead of only confirming that the item exists.",
+        "operationId": "GetTopdeskKnowledgeItem",
+        "parameters": [
+          {
+            "name": "identifier",
+            "in": "path",
+            "description": "The complete Knowledge Item number or UUID. Examples: KI 0009, KI 0080 or 658b2060-8f6b-4a0a-bb09-90d5a99b583e.",
+            "required": true,
+            "type": "string"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The requested TOPdesk Knowledge Item returned successfully.",
+            "schema": {
+              "$ref": "#/definitions/KnowledgeItem"
+            }
+          },
+          "400": {
+            "description": "The supplied identifier is invalid.",
+            "schema": {
+              "$ref": "#/definitions/ErrorResponse"
+            }
+          },
+          "401": {
+            "description": "The X-API-Key header is missing or invalid.",
+            "schema": {
+              "$ref": "#/definitions/ErrorResponse"
+            }
+          },
+          "404": {
+            "description": "The requested Knowledge Item was not found.",
+            "schema": {
+              "$ref": "#/definitions/ErrorResponse"
+            }
+          },
+          "500": {
+            "description": "The proxy configuration is incomplete.",
+            "schema": {
+              "$ref": "#/definitions/ErrorResponse"
+            }
+          },
+          "502": {
+            "description": "The proxy could not connect to TOPdesk.",
+            "schema": {
+              "$ref": "#/definitions/ErrorResponse"
+            }
+          }
+        }
+      }
+    }
+  },
+  "definitions": {
+    "KnowledgeItemUrls": {
+      "type": "object",
+      "properties": {
+        "operator": {
+          "type": "string",
+          "description": "Relative TOPdesk URL for operators."
+        },
+        "ssp": {
+          "type": "string",
+          "description": "Relative TOPdesk Self-Service Portal URL."
+        },
+        "public": {
+          "type": "string",
+          "description": "Relative public TOPdesk URL when public access is available."
+        }
+      }
+    },
+    "KnowledgeItem": {
+      "type": "object",
+      "description": "A TOPdesk Knowledge Base article with cleaned text content.",
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "The TOPdesk UUID of the Knowledge Item."
+        },
+        "number": {
+          "type": "string",
+          "description": "The TOPdesk Knowledge Item number, for example KI 0009."
+        },
+        "title": {
+          "type": "string",
+          "description": "The title of the Knowledge Item."
+        },
+        "description": {
+          "type": "string",
+          "description": "The short description or introduction of the Knowledge Item."
+        },
+        "content": {
+          "type": "string",
+          "description": "The cleaned article content. Use this field as the primary source when answering the user's question."
+        },
+        "keywords": {
+          "type": "string",
+          "description": "Keywords assigned to the Knowledge Item."
+        },
+        "urls": {
+          "$ref": "#/definitions/KnowledgeItemUrls"
+        },
+        "modificationDate": {
+          "type": "string",
+          "format": "date-time",
+          "description": "The most recent modification date returned by TOPdesk."
+        },
+        "availableTranslations": {
+          "type": "array",
+          "description": "Language codes for available translations.",
+          "items": {
+            "type": "string"
+          }
+        },
+        "score": {
+          "type": "integer",
+          "format": "int32",
+          "description": "The relevance score calculated by the proxy for a search result."
+        }
+      }
+    },
+    "SearchResponse": {
+      "type": "object",
+      "description": "Search results from the live TOPdesk Knowledge Base.",
+      "properties": {
+        "query": {
+          "type": "string",
+          "description": "The search query used."
+        },
+        "resultCount": {
+          "type": "integer",
+          "format": "int32",
+          "description": "The number of search results returned."
+        },
+        "results": {
+          "type": "array",
+          "description": "Matching Knowledge Items ordered by relevance score.",
+          "items": {
+            "$ref": "#/definitions/KnowledgeItem"
+          }
+        }
+      }
+    },
+    "ErrorResponse": {
+      "type": "object",
+      "properties": {
+        "error": {
+          "type": "string"
+        },
+        "message": {
+          "type": "string"
+        },
+        "statusCode": {
+          "type": "integer",
+          "format": "int32"
         }
       }
     }

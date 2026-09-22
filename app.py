@@ -1,6 +1,7 @@
 from flask import Flask, jsonify, request
 import hmac
 import html
+import logging
 import os
 import re
 
@@ -8,6 +9,8 @@ import requests
 
 
 app = Flask(__name__)
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger("topdesk-proxy")
 
 
 # ---------------------------------------------------------
@@ -29,10 +32,8 @@ TOPDESK_BASE_URL = (
 )
 
 REQUEST_TIMEOUT = 30
-
 DEFAULT_PAGE_SIZE = 100
 MAX_PAGE_SIZE = 1000
-
 DEFAULT_RESULT_LIMIT = 10
 MAX_RESULT_LIMIT = 25
 
@@ -67,14 +68,34 @@ def get_missing_configuration():
 
 
 # ---------------------------------------------------------
+# Safe request diagnostics
+# ---------------------------------------------------------
+
+@app.before_request
+def log_request_diagnostics():
+    """Log request metadata without logging secret header values."""
+    supplied_key = request.headers.get("X-API-Key", "")
+
+    logger.info(
+        "Incoming request method=%s path=%s query=%s "
+        "header_names=%s x_api_key_present=%s x_api_key_length=%s",
+        request.method,
+        request.path,
+        request.query_string.decode("utf-8", errors="replace"),
+        sorted(request.headers.keys()),
+        bool(supplied_key),
+        len(supplied_key),
+    )
+
+    return None
+
+
+# ---------------------------------------------------------
 # Proxy API authentication
 # ---------------------------------------------------------
 
 def verify_proxy_api_key():
-    supplied_key = request.headers.get(
-        "X-API-Key",
-        ""
-    )
+    supplied_key = request.headers.get("X-API-Key", "")
 
     if not PROXY_API_KEY:
         return False
@@ -97,11 +118,18 @@ def authorize_request():
         return None
 
     if not verify_proxy_api_key():
+        logger.warning(
+            "Unauthorized request path=%s x_api_key_present=%s "
+            "x_api_key_length=%s configured_key_present=%s",
+            request.path,
+            bool(request.headers.get("X-API-Key", "")),
+            len(request.headers.get("X-API-Key", "")),
+            bool(PROXY_API_KEY),
+        )
+
         return jsonify({
             "error": "Unauthorized",
-            "message": (
-                "A valid X-API-Key header is required."
-            )
+            "message": "A valid X-API-Key header is required."
         }), 401
 
     return None
@@ -117,7 +145,6 @@ def clean_html(value):
 
     text = html.unescape(str(value))
 
-    # Convert line breaks
     text = re.sub(
         r"<\s*br\s*/?\s*>",
         "\n",
@@ -125,7 +152,6 @@ def clean_html(value):
         flags=re.IGNORECASE
     )
 
-    # Convert block endings to line breaks
     text = re.sub(
         r"</\s*(p|div|li|ol|ul|h[1-6])\s*>",
         "\n",
@@ -133,7 +159,6 @@ def clean_html(value):
         flags=re.IGNORECASE
     )
 
-    # Remove images
     text = re.sub(
         r"<\s*img\b[^>]*>",
         "",
@@ -141,28 +166,10 @@ def clean_html(value):
         flags=re.IGNORECASE
     )
 
-    # Remove remaining HTML tags
-    text = re.sub(
-        r"<[^>]+>",
-        "",
-        text
-    )
-
-    # Decode any remaining HTML entities
+    text = re.sub(r"<[^>]+>", "", text)
     text = html.unescape(text)
-
-    # Normalize spaces and newlines
-    text = re.sub(
-        r"[ \t]+",
-        " ",
-        text
-    )
-
-    text = re.sub(
-        r"\n\s*\n+",
-        "\n\n",
-        text
-    )
+    text = re.sub(r"[ \t]+", " ", text)
+    text = re.sub(r"\n\s*\n+", "\n\n", text)
 
     return text.strip()
 
@@ -180,49 +187,20 @@ def get_translation_content(item):
 
 
 def transform_item(item):
-    translation_content = get_translation_content(
-        item
-    )
+    translation_content = get_translation_content(item)
 
     return {
         "id": item.get("id", ""),
         "number": item.get("number", ""),
-        "title": clean_html(
-            translation_content.get(
-                "title",
-                ""
-            )
-        ),
+        "title": clean_html(translation_content.get("title", "")),
         "description": clean_html(
-            translation_content.get(
-                "description",
-                ""
-            )
+            translation_content.get("description", "")
         ),
-        "content": clean_html(
-            translation_content.get(
-                "content",
-                ""
-            )
-        ),
-        "keywords": clean_html(
-            translation_content.get(
-                "keywords",
-                ""
-            )
-        ),
-        "urls": item.get(
-            "urls",
-            {}
-        ),
-        "modificationDate": item.get(
-            "modificationDate",
-            ""
-        ),
-        "availableTranslations": item.get(
-            "availableTranslations",
-            []
-        )
+        "content": clean_html(translation_content.get("content", "")),
+        "keywords": clean_html(translation_content.get("keywords", "")),
+        "urls": item.get("urls", {}),
+        "modificationDate": item.get("modificationDate", ""),
+        "availableTranslations": item.get("availableTranslations", [])
     }
 
 
@@ -235,23 +213,17 @@ def topdesk_get(path, params=None):
 
     if missing:
         raise RuntimeError(
-            "Missing environment variables: "
-            + ", ".join(missing)
+            "Missing environment variables: " + ", ".join(missing)
         )
 
     response = requests.get(
         f"{TOPDESK_BASE_URL}{path}",
         params=params,
-        auth=(
-            TOPDESK_USER,
-            TOPDESK_TOKEN
-        ),
+        auth=(TOPDESK_USER, TOPDESK_TOKEN),
         headers={
             "Accept": (
-                "application/"
-                "x.topdesk-kb-ki-list-v1+json, "
-                "application/"
-                "x.topdesk-kb-ki-v1+json, "
+                "application/x.topdesk-kb-ki-list-v1+json, "
+                "application/x.topdesk-kb-ki-v1+json, "
                 "application/json"
             )
         },
@@ -259,7 +231,6 @@ def topdesk_get(path, params=None):
     )
 
     response.raise_for_status()
-
     return response.json()
 
 
@@ -277,19 +248,10 @@ def get_all_knowledge_items():
             }
         )
 
-        page_items = data.get(
-            "item",
-            []
-        )
-
+        page_items = data.get("item", [])
         all_items.extend(page_items)
 
-        next_page = data.get("next")
-
-        if not next_page:
-            break
-
-        if not page_items:
+        if not data.get("next") or not page_items:
             break
 
         start += len(page_items)
@@ -302,46 +264,23 @@ def get_all_knowledge_items():
 # ---------------------------------------------------------
 
 def calculate_score(item, search_terms):
-    title = item.get(
-        "title",
-        ""
-    ).lower()
-
-    description = item.get(
-        "description",
-        ""
-    ).lower()
-
-    content = item.get(
-        "content",
-        ""
-    ).lower()
-
-    keywords = item.get(
-        "keywords",
-        ""
-    ).lower()
-
-    number = item.get(
-        "number",
-        ""
-    ).lower()
+    title = item.get("title", "").lower()
+    description = item.get("description", "").lower()
+    content = item.get("content", "").lower()
+    keywords = item.get("keywords", "").lower()
+    number = item.get("number", "").lower()
 
     score = 0
 
     for term in search_terms:
         if term in number:
             score += 100
-
         if term in title:
             score += 20
-
         if term in keywords:
             score += 15
-
         if term in description:
             score += 8
-
         if term in content:
             score += 3
 
@@ -356,19 +295,14 @@ def calculate_score(item, search_terms):
 def home():
     return jsonify({
         "status": "ok",
-        "service": (
-            "TOPdesk Knowledge Base Proxy"
-        ),
+        "service": "TOPdesk Knowledge Base Proxy",
         "description": (
-            "Provides live search and retrieval "
-            "of TOPdesk Knowledge Items."
+            "Provides live search and retrieval of TOPdesk Knowledge Items."
         ),
         "endpoints": {
             "health": "/health",
             "search": "/search?q=helpdesk",
-            "specificItem": (
-                "/knowledge-items/KI%200080"
-            ),
+            "specificItem": "/knowledge-items/KI%200080",
             "swagger": "/swagger.json"
         }
     })
@@ -386,9 +320,7 @@ def health():
 
     return jsonify({
         "status": "ok",
-        "service": (
-            "TOPdesk Knowledge Base Proxy"
-        )
+        "service": "TOPdesk Knowledge Base Proxy"
     })
 
 
@@ -404,25 +336,10 @@ def list_knowledge_items():
             DEFAULT_PAGE_SIZE,
             type=int
         )
+        start = request.args.get("start", 0, type=int)
 
-        start = request.args.get(
-            "start",
-            0,
-            type=int
-        )
-
-        page_size = max(
-            1,
-            min(
-                page_size,
-                MAX_PAGE_SIZE
-            )
-        )
-
-        start = max(
-            0,
-            start
-        )
+        page_size = max(1, min(page_size, MAX_PAGE_SIZE))
+        start = max(0, start)
 
         data = topdesk_get(
             "/knowledgeItems",
@@ -435,10 +352,7 @@ def list_knowledge_items():
 
         items = [
             transform_item(item)
-            for item in data.get(
-                "item",
-                []
-            )
+            for item in data.get("item", [])
         ]
 
         return jsonify({
@@ -446,9 +360,7 @@ def list_knowledge_items():
             "count": len(items),
             "start": start,
             "pageSize": page_size,
-            "hasNextPage": bool(
-                data.get("next")
-            )
+            "hasNextPage": bool(data.get("next"))
         })
 
     except requests.HTTPError as error:
@@ -457,34 +369,26 @@ def list_knowledge_items():
             if error.response is not None
             else 502
         )
-
         response_text = (
             error.response.text
             if error.response is not None
             else str(error)
         )
-
         return jsonify({
-            "error": (
-                "TOPdesk request failed"
-            ),
+            "error": "TOPdesk request failed",
             "statusCode": status_code,
             "message": response_text
         }), status_code
 
     except requests.RequestException as error:
         return jsonify({
-            "error": (
-                "TOPdesk connection failed"
-            ),
+            "error": "TOPdesk connection failed",
             "message": str(error)
         }), 502
 
     except RuntimeError as error:
         return jsonify({
-            "error": (
-                "Configuration error"
-            ),
+            "error": "Configuration error",
             "message": str(error)
         }), 500
 
@@ -493,21 +397,15 @@ def list_knowledge_items():
 # Get one specific Knowledge Item
 # ---------------------------------------------------------
 
-@app.get(
-    "/knowledge-items/<path:identifier>"
-)
+@app.get("/knowledge-items/<path:identifier>")
 def get_knowledge_item(identifier):
     try:
         data = topdesk_get(
             f"/knowledgeItems/{identifier}",
-            params={
-                "fields": FIELDS
-            }
+            params={"fields": FIELDS}
         )
 
-        return jsonify(
-            transform_item(data)
-        )
+        return jsonify(transform_item(data))
 
     except requests.HTTPError as error:
         status_code = (
@@ -515,34 +413,26 @@ def get_knowledge_item(identifier):
             if error.response is not None
             else 502
         )
-
         response_text = (
             error.response.text
             if error.response is not None
             else str(error)
         )
-
         return jsonify({
-            "error": (
-                "TOPdesk request failed"
-            ),
+            "error": "TOPdesk request failed",
             "statusCode": status_code,
             "message": response_text
         }), status_code
 
     except requests.RequestException as error:
         return jsonify({
-            "error": (
-                "TOPdesk connection failed"
-            ),
+            "error": "TOPdesk connection failed",
             "message": str(error)
         }), 502
 
     except RuntimeError as error:
         return jsonify({
-            "error": (
-                "Configuration error"
-            ),
+            "error": "Configuration error",
             "message": str(error)
         }), 500
 
@@ -553,32 +443,18 @@ def get_knowledge_item(identifier):
 
 @app.get("/search")
 def search_knowledge_items():
-    query = request.args.get(
-        "q",
-        ""
-    ).strip()
-
+    query = request.args.get("q", "").strip()
     limit = request.args.get(
         "limit",
         DEFAULT_RESULT_LIMIT,
         type=int
     )
-
-    limit = max(
-        1,
-        min(
-            limit,
-            MAX_RESULT_LIMIT
-        )
-    )
+    limit = max(1, min(limit, MAX_RESULT_LIMIT))
 
     if not query:
         return jsonify({
             "error": "Missing query",
-            "message": (
-                "Supply a search term "
-                "with the q parameter."
-            )
+            "message": "Supply a search term with the q parameter."
         }), 400
 
     search_terms = [
@@ -589,7 +465,6 @@ def search_knowledge_items():
 
     try:
         raw_items = get_all_knowledge_items()
-
         transformed_items = [
             transform_item(item)
             for item in raw_items
@@ -598,10 +473,7 @@ def search_knowledge_items():
         scored_items = []
 
         for item in transformed_items:
-            score = calculate_score(
-                item,
-                search_terms
-            )
+            score = calculate_score(item, search_terms)
 
             if score > 0:
                 result = dict(item)
@@ -609,9 +481,7 @@ def search_knowledge_items():
                 scored_items.append(result)
 
         scored_items.sort(
-            key=lambda current_item: (
-                current_item["score"]
-            ),
+            key=lambda current_item: current_item["score"],
             reverse=True
         )
 
@@ -629,34 +499,26 @@ def search_knowledge_items():
             if error.response is not None
             else 502
         )
-
         response_text = (
             error.response.text
             if error.response is not None
             else str(error)
         )
-
         return jsonify({
-            "error": (
-                "TOPdesk request failed"
-            ),
+            "error": "TOPdesk request failed",
             "statusCode": status_code,
             "message": response_text
         }), status_code
 
     except requests.RequestException as error:
         return jsonify({
-            "error": (
-                "TOPdesk connection failed"
-            ),
+            "error": "TOPdesk connection failed",
             "message": str(error)
         }), 502
 
     except RuntimeError as error:
         return jsonify({
-            "error": (
-                "Configuration error"
-            ),
+            "error": "Configuration error",
             "message": str(error)
         }), 500
 
@@ -670,25 +532,16 @@ def swagger():
     return jsonify({
         "swagger": "2.0",
         "info": {
-            "title": (
-                "TOPdesk Knowledge Base Proxy"
-            ),
+            "title": "TOPdesk Knowledge Base Proxy",
             "description": (
-                "Searches and retrieves live "
-                "TOPdesk Knowledge Base articles."
+                "Searches and retrieves live TOPdesk Knowledge Base articles."
             ),
-            "version": "2.0.0"
+            "version": "2.1.0"
         },
-        "host": (
-            "topdesk-agent-test.onrender.com"
-        ),
+        "host": "topdesk-agent-test.onrender.com",
         "basePath": "/",
-        "schemes": [
-            "https"
-        ],
-        "produces": [
-            "application/json"
-        ],
+        "schemes": ["https"],
+        "produces": ["application/json"],
         "securityDefinitions": {
             "apiKey": {
                 "type": "apiKey",
@@ -697,32 +550,23 @@ def swagger():
             }
         },
         "security": [
-            {
-                "apiKey": []
-            }
+            {"apiKey": []}
         ],
         "paths": {
             "/search": {
                 "get": {
-                    "summary": (
-                        "Search TOPdesk "
-                        "Knowledge Base"
-                    ),
+                    "summary": "Search TOPdesk Knowledge Base",
                     "description": (
-                        "Searches Knowledge Item "
-                        "numbers, titles, descriptions, "
+                        "Searches Knowledge Item numbers, titles, descriptions, "
                         "article content and keywords."
                     ),
-                    "operationId": (
-                        "SearchTopdeskKnowledgeItems"
-                    ),
+                    "operationId": "SearchTopdeskKnowledgeItems",
                     "parameters": [
                         {
                             "name": "q",
                             "in": "query",
                             "description": (
-                                "Search words or a "
-                                "Knowledge Item number."
+                                "Search words or a Knowledge Item number."
                             ),
                             "required": True,
                             "type": "string"
@@ -730,10 +574,7 @@ def swagger():
                         {
                             "name": "limit",
                             "in": "query",
-                            "description": (
-                                "Maximum number "
-                                "of results."
-                            ),
+                            "description": "Maximum number of results.",
                             "required": False,
                             "type": "integer",
                             "default": 10,
@@ -743,53 +584,34 @@ def swagger():
                     ],
                     "responses": {
                         "200": {
-                            "description": (
-                                "Matching TOPdesk "
-                                "Knowledge Items."
-                            ),
+                            "description": "Matching TOPdesk Knowledge Items.",
                             "schema": {
-                                "$ref": (
-                                    "#/definitions/"
-                                    "SearchResponse"
-                                )
+                                "$ref": "#/definitions/SearchResponse"
                             }
                         },
                         "400": {
-                            "description": (
-                                "Search query "
-                                "is missing."
-                            )
+                            "description": "Search query is missing."
                         },
                         "401": {
-                            "description": (
-                                "Invalid API key."
-                            )
+                            "description": "Invalid API key."
                         }
                     }
                 }
             },
             "/knowledge-items/{identifier}": {
                 "get": {
-                    "summary": (
-                        "Get one TOPdesk "
-                        "Knowledge Item"
-                    ),
+                    "summary": "Get one TOPdesk Knowledge Item",
                     "description": (
-                        "Retrieves one Knowledge "
-                        "Item using its UUID or "
-                        "KI number."
+                        "Retrieves one Knowledge Item using its UUID or KI number."
                     ),
-                    "operationId": (
-                        "GetTopdeskKnowledgeItem"
-                    ),
+                    "operationId": "GetTopdeskKnowledgeItem",
                     "parameters": [
                         {
                             "name": "identifier",
                             "in": "path",
                             "description": (
-                                "Knowledge Item UUID "
-                                "or KI number, for "
-                                "example KI 0080."
+                                "Knowledge Item UUID or KI number, "
+                                "for example KI 0080."
                             ),
                             "required": True,
                             "type": "string"
@@ -797,27 +619,16 @@ def swagger():
                     ],
                     "responses": {
                         "200": {
-                            "description": (
-                                "Requested TOPdesk "
-                                "Knowledge Item."
-                            ),
+                            "description": "Requested TOPdesk Knowledge Item.",
                             "schema": {
-                                "$ref": (
-                                    "#/definitions/"
-                                    "KnowledgeItem"
-                                )
+                                "$ref": "#/definitions/KnowledgeItem"
                             }
                         },
                         "401": {
-                            "description": (
-                                "Invalid API key."
-                            )
+                            "description": "Invalid API key."
                         },
                         "404": {
-                            "description": (
-                                "Knowledge Item "
-                                "not found."
-                            )
+                            "description": "Knowledge Item not found."
                         }
                     }
                 }
@@ -827,48 +638,25 @@ def swagger():
             "KnowledgeItem": {
                 "type": "object",
                 "properties": {
-                    "id": {
-                        "type": "string"
-                    },
-                    "number": {
-                        "type": "string"
-                    },
-                    "title": {
-                        "type": "string"
-                    },
-                    "description": {
-                        "type": "string"
-                    },
-                    "content": {
-                        "type": "string"
-                    },
-                    "keywords": {
-                        "type": "string"
-                    },
-                    "modificationDate": {
-                        "type": "string"
-                    },
-                    "score": {
-                        "type": "integer"
-                    }
+                    "id": {"type": "string"},
+                    "number": {"type": "string"},
+                    "title": {"type": "string"},
+                    "description": {"type": "string"},
+                    "content": {"type": "string"},
+                    "keywords": {"type": "string"},
+                    "modificationDate": {"type": "string"},
+                    "score": {"type": "integer"}
                 }
             },
             "SearchResponse": {
                 "type": "object",
                 "properties": {
-                    "query": {
-                        "type": "string"
-                    },
-                    "resultCount": {
-                        "type": "integer"
-                    },
+                    "query": {"type": "string"},
+                    "resultCount": {"type": "integer"},
                     "results": {
                         "type": "array",
                         "items": {
-                            "$ref": (
-                                "#/definitions/"
-                                "KnowledgeItem"
-                            )
+                            "$ref": "#/definitions/KnowledgeItem"
                         }
                     }
                 }
@@ -900,12 +688,7 @@ def not_found(error):
 # ---------------------------------------------------------
 
 if __name__ == "__main__":
-    port = int(
-        os.getenv(
-            "PORT",
-            "10000"
-        )
-    )
+    port = int(os.getenv("PORT", "10000"))
 
     app.run(
         host="0.0.0.0",
