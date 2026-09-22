@@ -11,7 +11,7 @@ TOPDESK_TOKEN = os.getenv("TOPDESK_TOKEN")
 def knowledge():
 
     response = requests.get(
-        "https://saether.topdesk.net/services/knowledge-base-v1/knowledgeItems?page_size=100",
+        "https://saether.topdesk.net/services/knowledge-base-v1/knowledgeItems?page_size=1000&fields=title,description,content,keywords",
         auth=(TOPDESK_USER, TOPDESK_TOKEN)
     )
 
