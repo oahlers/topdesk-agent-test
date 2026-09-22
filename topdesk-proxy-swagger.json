@@ -1,12 +1,11 @@
 {
   "swagger": "2.0",
   "info": {
-    "title": "TOPdesk Live Search v50",
-    "description": "Searches and retrieves live TOPdesk Knowledge Base articles through the Render proxy.",
+    "title": "TOPdesk Knowledge Base and Incidents Proxy",
+    "description": "Searches and retrieves live TOPdesk Knowledge Base articles and the latest accessible TOPdesk incident through the Render proxy.",
     "version": "3.0.0"
   },
   "host": "topdesk-agent-test.onrender.com",
-  "basePath": "/",
   "schemes": [
     "https"
   ],
@@ -14,51 +13,29 @@
     "application/json"
   ],
   "paths": {
-    "/incidents/latest": {
-  "get": {
-    "tags": [
-      "TOPdesk Incidents"
-    ],
-    "summary": "Get the latest accessible TOPdesk incident",
-    "description": "Returns the most recently created TOPdesk incident that the integration account has permission to read. Use this operation when the user asks for the latest, newest or most recently registered case, ticket or incident.",
-    "operationId": "GetLatestTopdeskIncident",
-    "responses": {
-      "200": {
-        "description": "Latest accessible incident returned successfully.",
-        "schema": {
-          "$ref": "#/definitions/Incident"
-        }
-      },
-      "404": {
-        "description": "No accessible incidents were found."
-      },
-      "500": {
-        "description": "Proxy configuration error."
-      },
-      "502": {
-        "description": "TOPdesk connection error."
-      }
-    }
-  }
-}
     "/search": {
       "get": {
+        "tags": [
+          "TOPdesk Knowledge Base"
+        ],
         "summary": "Search TOPdesk Knowledge Base",
-        "description": "Searches title, description, content, keywords and Knowledge Item numbers.",
+        "description": "Searches Knowledge Item numbers, titles, descriptions, article content and keywords. Use this operation for general questions about internal instructions and TOPdesk Knowledge Base topics.",
         "operationId": "SearchTopdeskKnowledgeItems",
         "parameters": [
           {
             "name": "q",
             "in": "query",
+            "description": "Search words or a Knowledge Item number.",
             "required": true,
-            "type": "string",
-            "description": "Search text"
+            "type": "string"
           },
           {
             "name": "limit",
             "in": "query",
+            "description": "Maximum number of results.",
             "required": false,
             "type": "integer",
+            "format": "int32",
             "default": 10,
             "minimum": 1,
             "maximum": 25
@@ -66,9 +43,27 @@
         ],
         "responses": {
           "200": {
-            "description": "Search results returned successfully.",
+            "description": "Matching TOPdesk Knowledge Items.",
             "schema": {
               "$ref": "#/definitions/SearchResponse"
+            }
+          },
+          "400": {
+            "description": "Search query is missing.",
+            "schema": {
+              "$ref": "#/definitions/ErrorResponse"
+            }
+          },
+          "500": {
+            "description": "Proxy configuration error.",
+            "schema": {
+              "$ref": "#/definitions/ErrorResponse"
+            }
+          },
+          "502": {
+            "description": "TOPdesk connection error.",
+            "schema": {
+              "$ref": "#/definitions/ErrorResponse"
             }
           }
         }
@@ -76,23 +71,80 @@
     },
     "/knowledge-items/{identifier}": {
       "get": {
-        "summary": "Get single TOPdesk Knowledge Item",
-        "description": "Retrieves one Knowledge Item by KI number or UUID.",
+        "tags": [
+          "TOPdesk Knowledge Base"
+        ],
+        "summary": "Get one TOPdesk Knowledge Item",
+        "description": "Retrieves one Knowledge Item using its UUID or KI number. Use this operation when the user explicitly supplies a KI number or Knowledge Item UUID.",
         "operationId": "GetTopdeskKnowledgeItem",
         "parameters": [
           {
             "name": "identifier",
             "in": "path",
+            "description": "Knowledge Item UUID or complete KI number, for example KI 0080.",
             "required": true,
-            "type": "string",
-            "description": "KI number or UUID"
+            "type": "string"
           }
         ],
         "responses": {
           "200": {
-            "description": "Knowledge Item returned successfully.",
+            "description": "Requested TOPdesk Knowledge Item.",
             "schema": {
               "$ref": "#/definitions/KnowledgeItem"
+            }
+          },
+          "404": {
+            "description": "Knowledge Item not found.",
+            "schema": {
+              "$ref": "#/definitions/ErrorResponse"
+            }
+          },
+          "500": {
+            "description": "Proxy configuration error.",
+            "schema": {
+              "$ref": "#/definitions/ErrorResponse"
+            }
+          },
+          "502": {
+            "description": "TOPdesk connection error.",
+            "schema": {
+              "$ref": "#/definitions/ErrorResponse"
+            }
+          }
+        }
+      }
+    },
+    "/incidents/latest": {
+      "get": {
+        "tags": [
+          "TOPdesk Incidents"
+        ],
+        "summary": "Get the latest accessible TOPdesk incident",
+        "description": "Returns the most recently created TOPdesk incident that the integration account is permitted to read. Use this operation when the user asks for the latest, newest or most recently registered case, ticket or incident.",
+        "operationId": "GetLatestTopdeskIncident",
+        "responses": {
+          "200": {
+            "description": "Latest accessible TOPdesk incident.",
+            "schema": {
+              "$ref": "#/definitions/Incident"
+            }
+          },
+          "404": {
+            "description": "No accessible incidents were found.",
+            "schema": {
+              "$ref": "#/definitions/ErrorResponse"
+            }
+          },
+          "500": {
+            "description": "Proxy configuration error.",
+            "schema": {
+              "$ref": "#/definitions/ErrorResponse"
+            }
+          },
+          "502": {
+            "description": "TOPdesk connection error.",
+            "schema": {
+              "$ref": "#/definitions/ErrorResponse"
             }
           }
         }
@@ -100,46 +152,20 @@
     }
   },
   "definitions": {
-    "Incident": {
-  "type": "object",
-  "properties": {
-    "id": {
-      "type": "string"
+    "KnowledgeItemUrls": {
+      "type": "object",
+      "properties": {
+        "operator": {
+          "type": "string"
+        },
+        "ssp": {
+          "type": "string"
+        },
+        "public": {
+          "type": "string"
+        }
+      }
     },
-    "number": {
-      "type": "string"
-    },
-    "briefDescription": {
-      "type": "string"
-    },
-    "request": {
-      "type": "string"
-    },
-    "creationDate": {
-      "type": "string",
-      "format": "date-time"
-    },
-    "modificationDate": {
-      "type": "string",
-      "format": "date-time"
-    },
-    "status": {
-      "type": "object"
-    },
-    "priority": {
-      "type": "object"
-    },
-    "caller": {
-      "type": "object"
-    },
-    "operator": {
-      "type": "object"
-    },
-    "operatorGroup": {
-      "type": "object"
-    }
-  }
-}
     "KnowledgeItem": {
       "type": "object",
       "properties": {
@@ -161,11 +187,21 @@
         "keywords": {
           "type": "string"
         },
-        "score": {
-          "type": "integer"
-        },
         "modificationDate": {
           "type": "string"
+        },
+        "availableTranslations": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "urls": {
+          "$ref": "#/definitions/KnowledgeItemUrls"
+        },
+        "score": {
+          "type": "integer",
+          "format": "int32"
         }
       }
     },
@@ -176,13 +212,54 @@
           "type": "string"
         },
         "resultCount": {
-          "type": "integer"
+          "type": "integer",
+          "format": "int32"
         },
         "results": {
           "type": "array",
           "items": {
             "$ref": "#/definitions/KnowledgeItem"
           }
+        }
+      }
+    },
+    "Incident": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "number": {
+          "type": "string"
+        },
+        "briefDescription": {
+          "type": "string"
+        },
+        "creationDate": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "modificationDate": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "status": {
+          "type": "string"
+        }
+      }
+    },
+    "ErrorResponse": {
+      "type": "object",
+      "properties": {
+        "error": {
+          "type": "string"
+        },
+        "message": {
+          "type": "string"
+        },
+        "statusCode": {
+          "type": "integer",
+          "format": "int32"
         }
       }
     }
