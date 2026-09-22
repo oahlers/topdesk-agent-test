@@ -1,5 +1,4 @@
 from flask import Flask, jsonify, request
-import hmac
 import html
 import logging
 import os
@@ -19,21 +18,20 @@ logger = logging.getLogger("topdesk-proxy")
 
 TOPDESK_USER = os.getenv("TOPDESK_USER")
 TOPDESK_TOKEN = os.getenv("TOPDESK_TOKEN")
-PROXY_API_KEY = os.getenv("PROXY_API_KEY")
 
 
 # ---------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------
 
-TOPDESK_BASE_URL = (
+TOPDESK_KNOWLEDGE_BASE_URL = (
     "https://saether.topdesk.net/"
     "services/knowledge-base-v1"
 )
 
 TOPDESK_INCIDENT_BASE_URL = (
     "https://saether.topdesk.net/"
-"tas/api"
+    "tas/api"
 )
 
 REQUEST_TIMEOUT = 30
@@ -66,53 +64,23 @@ def get_missing_configuration():
     if not TOPDESK_TOKEN:
         missing.append("TOPDESK_TOKEN")
 
-    if not PROXY_API_KEY:
-        missing.append("PROXY_API_KEY")
-
     return missing
 
 
 # ---------------------------------------------------------
-# Safe request diagnostics
+# Request diagnostics
 # ---------------------------------------------------------
 
 @app.before_request
 def log_request_diagnostics():
-    """Log request metadata without logging secret header values."""
-    supplied_key = request.headers.get("X-API-Key", "")
-
     logger.info(
-        "Incoming request method=%s path=%s query=%s "
-        "header_names=%s x_api_key_present=%s x_api_key_length=%s",
+        "Incoming request method=%s path=%s query=%s header_names=%s",
         request.method,
         request.path,
         request.query_string.decode("utf-8", errors="replace"),
         sorted(request.headers.keys()),
-        bool(supplied_key),
-        len(supplied_key),
     )
 
-    return None
-
-
-# ---------------------------------------------------------
-# Proxy API authentication
-# ---------------------------------------------------------
-
-def verify_proxy_api_key():
-    supplied_key = request.headers.get("X-API-Key", "")
-
-    if not PROXY_API_KEY:
-        return False
-
-    return hmac.compare_digest(
-        supplied_key,
-        PROXY_API_KEY
-    )
-
-
-@app.before_request
-def authorize_request():
     return None
 
 
@@ -173,21 +141,62 @@ def transform_item(item):
     return {
         "id": item.get("id", ""),
         "number": item.get("number", ""),
-        "title": clean_html(translation_content.get("title", "")),
+        "title": clean_html(
+            translation_content.get("title", "")
+        ),
         "description": clean_html(
             translation_content.get("description", "")
         ),
-        "content": clean_html(translation_content.get("content", "")),
-        "keywords": clean_html(translation_content.get("keywords", "")),
+        "content": clean_html(
+            translation_content.get("content", "")
+        ),
+        "keywords": clean_html(
+            translation_content.get("keywords", "")
+        ),
         "urls": item.get("urls", {}),
-        "modificationDate": item.get("modificationDate", ""),
-        "availableTranslations": item.get("availableTranslations", [])
+        "modificationDate": item.get(
+            "modificationDate",
+            ""
+        ),
+        "availableTranslations": item.get(
+            "availableTranslations",
+            []
+        )
     }
 
 
 # ---------------------------------------------------------
-# TOPdesk HTTP client
+# TOPdesk HTTP clients
 # ---------------------------------------------------------
+
+def topdesk_get(path, params=None):
+    missing = get_missing_configuration()
+
+    if missing:
+        raise RuntimeError(
+            "Missing environment variables: "
+            + ", ".join(missing)
+        )
+
+    response = requests.get(
+        f"{TOPDESK_KNOWLEDGE_BASE_URL}{path}",
+        params=params,
+        auth=(TOPDESK_USER, TOPDESK_TOKEN),
+        headers={
+            "Accept": (
+                "application/"
+                "x.topdesk-kb-ki-list-v1+json, "
+                "application/"
+                "x.topdesk-kb-ki-v1+json, "
+                "application/json"
+            )
+        },
+        timeout=REQUEST_TIMEOUT
+    )
+
+    response.raise_for_status()
+    return response.json()
+
 
 def topdesk_incident_get(path, params=None):
     missing = get_missing_configuration()
@@ -201,10 +210,7 @@ def topdesk_incident_get(path, params=None):
     response = requests.get(
         f"{TOPDESK_INCIDENT_BASE_URL}{path}",
         params=params,
-        auth=(
-            TOPDESK_USER,
-            TOPDESK_TOKEN
-        ),
+        auth=(TOPDESK_USER, TOPDESK_TOKEN),
         headers={
             "Accept": "application/json"
         },
@@ -256,16 +262,44 @@ def calculate_score(item, search_terms):
     for term in search_terms:
         if term in number:
             score += 100
+
         if term in title:
             score += 20
+
         if term in keywords:
             score += 15
+
         if term in description:
             score += 8
+
         if term in content:
             score += 10
 
     return score
+
+
+# ---------------------------------------------------------
+# Shared error handling
+# ---------------------------------------------------------
+
+def topdesk_http_error_response(error, label):
+    status_code = (
+        error.response.status_code
+        if error.response is not None
+        else 502
+    )
+
+    response_text = (
+        error.response.text
+        if error.response is not None
+        else str(error)
+    )
+
+    return jsonify({
+        "error": label,
+        "statusCode": status_code,
+        "message": response_text
+    }), status_code
 
 
 # ---------------------------------------------------------
@@ -276,14 +310,16 @@ def calculate_score(item, search_terms):
 def home():
     return jsonify({
         "status": "ok",
-        "service": "TOPdesk Knowledge Base Proxy",
+        "service": "TOPdesk Knowledge Base and Incident Proxy",
         "description": (
-            "Provides live search and retrieval of TOPdesk Knowledge Items."
+            "Provides live search and retrieval of TOPdesk "
+            "Knowledge Items and the latest accessible incident."
         ),
         "endpoints": {
             "health": "/health",
             "search": "/search?q=helpdesk",
             "specificItem": "/knowledge-items/KI%200080",
+            "latestIncident": "/incidents/latest",
             "swagger": "/swagger.json"
         }
     })
@@ -301,8 +337,13 @@ def health():
 
     return jsonify({
         "status": "ok",
-        "service": "TOPdesk Knowledge Base Proxy"
+        "service": "TOPdesk Knowledge Base and Incident Proxy"
     })
+
+
+# ---------------------------------------------------------
+# Latest Incident
+# ---------------------------------------------------------
 
 @app.get("/incidents/latest")
 def get_latest_incident():
@@ -313,15 +354,17 @@ def get_latest_incident():
                 "pageStart": 0,
                 "pageSize": 1,
                 "sort": "creationDate:desc",
-                "dateFormat": "iso8601"
+                "dateFormat": "iso8601",
+                "fields": (
+                    "id,number,briefDescription,"
+                    "creationDate,modificationDate,status"
+                )
             }
         )
 
         if not data:
             return jsonify({
-                "message": (
-                    "No accessible incidents were found."
-                )
+                "message": "No accessible incidents were found."
             }), 404
 
         incident = data[0]
@@ -329,12 +372,8 @@ def get_latest_incident():
         return jsonify({
             "id": incident.get("id", ""),
             "number": incident.get("number", ""),
-            "briefDescription": incident.get(
-                "briefDescription",
-                ""
-            ),
-            "request": clean_html(
-                incident.get("request", "")
+            "briefDescription": clean_html(
+                incident.get("briefDescription", "")
             ),
             "creationDate": incident.get(
                 "creationDate",
@@ -344,32 +383,14 @@ def get_latest_incident():
                 "modificationDate",
                 ""
             ),
-            "status": incident.get("status", {}),
-            "priority": incident.get("priority", {}),
-            "caller": incident.get("caller", {}),
-            "operator": incident.get("operator", {}),
-            "operatorGroup": incident.get(
-                "operatorGroup",
-                {}
-            )
+            "status": incident.get("status", "")
         })
 
     except requests.HTTPError as error:
-        status_code = (
-            error.response.status_code
-            if error.response is not None
-            else 502
+        return topdesk_http_error_response(
+            error,
+            "TOPdesk incident request failed"
         )
-
-        return jsonify({
-            "error": "TOPdesk incident request failed",
-            "statusCode": status_code,
-            "message": (
-                error.response.text
-                if error.response is not None
-                else str(error)
-            )
-        }), status_code
 
     except requests.RequestException as error:
         return jsonify({
@@ -424,21 +445,10 @@ def list_knowledge_items():
         })
 
     except requests.HTTPError as error:
-        status_code = (
-            error.response.status_code
-            if error.response is not None
-            else 502
+        return topdesk_http_error_response(
+            error,
+            "TOPdesk request failed"
         )
-        response_text = (
-            error.response.text
-            if error.response is not None
-            else str(error)
-        )
-        return jsonify({
-            "error": "TOPdesk request failed",
-            "statusCode": status_code,
-            "message": response_text
-        }), status_code
 
     except requests.RequestException as error:
         return jsonify({
@@ -468,21 +478,10 @@ def get_knowledge_item(identifier):
         return jsonify(transform_item(data))
 
     except requests.HTTPError as error:
-        status_code = (
-            error.response.status_code
-            if error.response is not None
-            else 502
+        return topdesk_http_error_response(
+            error,
+            "TOPdesk request failed"
         )
-        response_text = (
-            error.response.text
-            if error.response is not None
-            else str(error)
-        )
-        return jsonify({
-            "error": "TOPdesk request failed",
-            "statusCode": status_code,
-            "message": response_text
-        }), status_code
 
     except requests.RequestException as error:
         return jsonify({
@@ -554,21 +553,10 @@ def search_knowledge_items():
         })
 
     except requests.HTTPError as error:
-        status_code = (
-            error.response.status_code
-            if error.response is not None
-            else 502
+        return topdesk_http_error_response(
+            error,
+            "TOPdesk request failed"
         )
-        response_text = (
-            error.response.text
-            if error.response is not None
-            else str(error)
-        )
-        return jsonify({
-            "error": "TOPdesk request failed",
-            "statusCode": status_code,
-            "message": response_text
-        }), status_code
 
     except requests.RequestException as error:
         return jsonify({
@@ -592,33 +580,23 @@ def swagger():
     return jsonify({
         "swagger": "2.0",
         "info": {
-            "title": "TOPdesk Knowledge Base Proxy",
+            "title": "TOPdesk Knowledge Base and Incidents Proxy",
             "description": (
-                "Searches and retrieves live TOPdesk Knowledge Base articles."
+                "Searches and retrieves live TOPdesk Knowledge Base "
+                "articles and the latest accessible TOPdesk incident."
             ),
-            "version": "2.1.0"
+            "version": "3.0.0"
         },
         "host": "topdesk-agent-test.onrender.com",
-        "basePath": "/",
         "schemes": ["https"],
         "produces": ["application/json"],
-        "securityDefinitions": {
-            "apiKey": {
-                "type": "apiKey",
-                "name": "X-API-Key",
-                "in": "header"
-            }
-        },
-        "security": [
-            {"apiKey": []}
-        ],
         "paths": {
             "/search": {
                 "get": {
                     "summary": "Search TOPdesk Knowledge Base",
                     "description": (
-                        "Searches Knowledge Item numbers, titles, descriptions, "
-                        "article content and keywords."
+                        "Searches Knowledge Item numbers, titles, "
+                        "descriptions, article content and keywords."
                     ),
                     "operationId": "SearchTopdeskKnowledgeItems",
                     "parameters": [
@@ -644,7 +622,9 @@ def swagger():
                     ],
                     "responses": {
                         "200": {
-                            "description": "Matching TOPdesk Knowledge Items.",
+                            "description": (
+                                "Matching TOPdesk Knowledge Items."
+                            ),
                             "schema": {
                                 "$ref": "#/definitions/SearchResponse"
                             }
@@ -652,8 +632,11 @@ def swagger():
                         "400": {
                             "description": "Search query is missing."
                         },
-                        "401": {
-                            "description": "Invalid API key."
+                        "500": {
+                            "description": "Proxy configuration error."
+                        },
+                        "502": {
+                            "description": "TOPdesk connection error."
                         }
                     }
                 }
@@ -662,7 +645,8 @@ def swagger():
                 "get": {
                     "summary": "Get one TOPdesk Knowledge Item",
                     "description": (
-                        "Retrieves one Knowledge Item using its UUID or KI number."
+                        "Retrieves one Knowledge Item using its UUID "
+                        "or KI number."
                     ),
                     "operationId": "GetTopdeskKnowledgeItem",
                     "parameters": [
@@ -679,16 +663,56 @@ def swagger():
                     ],
                     "responses": {
                         "200": {
-                            "description": "Requested TOPdesk Knowledge Item.",
+                            "description": (
+                                "Requested TOPdesk Knowledge Item."
+                            ),
                             "schema": {
                                 "$ref": "#/definitions/KnowledgeItem"
                             }
                         },
-                        "401": {
-                            "description": "Invalid API key."
-                        },
                         "404": {
                             "description": "Knowledge Item not found."
+                        },
+                        "500": {
+                            "description": "Proxy configuration error."
+                        },
+                        "502": {
+                            "description": "TOPdesk connection error."
+                        }
+                    }
+                }
+            },
+            "/incidents/latest": {
+                "get": {
+                    "summary": (
+                        "Get the latest accessible TOPdesk incident"
+                    ),
+                    "description": (
+                        "Returns the most recently created TOPdesk incident "
+                        "that the integration account is permitted to read. "
+                        "Use this when the user asks for the latest, newest "
+                        "or most recently registered case, ticket or incident."
+                    ),
+                    "operationId": "GetLatestTopdeskIncident",
+                    "responses": {
+                        "200": {
+                            "description": (
+                                "Latest accessible incident returned."
+                            ),
+                            "schema": {
+                                "$ref": "#/definitions/Incident"
+                            }
+                        },
+                        "404": {
+                            "description": (
+                                "No accessible incidents were found."
+                            )
+                        },
+                        "500": {
+                            "description": "Proxy configuration error."
+                        },
+                        "502": {
+                            "description": "TOPdesk connection error."
                         }
                     }
                 }
@@ -705,6 +729,11 @@ def swagger():
                     "content": {"type": "string"},
                     "keywords": {"type": "string"},
                     "modificationDate": {"type": "string"},
+                    "availableTranslations": {
+                        "type": "array",
+                        "items": {"type": "string"}
+                    },
+                    "urls": {"type": "object"},
                     "score": {"type": "integer"}
                 }
             },
@@ -719,6 +748,31 @@ def swagger():
                             "$ref": "#/definitions/KnowledgeItem"
                         }
                     }
+                }
+            },
+            "Incident": {
+                "type": "object",
+                "properties": {
+                    "id": {"type": "string"},
+                    "number": {"type": "string"},
+                    "briefDescription": {"type": "string"},
+                    "creationDate": {
+                        "type": "string",
+                        "format": "date-time"
+                    },
+                    "modificationDate": {
+                        "type": "string",
+                        "format": "date-time"
+                    },
+                    "status": {"type": "string"}
+                }
+            },
+            "ErrorResponse": {
+                "type": "object",
+                "properties": {
+                    "error": {"type": "string"},
+                    "message": {"type": "string"},
+                    "statusCode": {"type": "integer"}
                 }
             }
         }
@@ -738,6 +792,7 @@ def not_found(error):
             "/search?q=helpdesk",
             "/knowledge-items?page_size=10",
             "/knowledge-items/KI%200080",
+            "/incidents/latest",
             "/swagger.json"
         ]
     }), 404

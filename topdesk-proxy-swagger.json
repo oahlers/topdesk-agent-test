@@ -14,6 +14,33 @@
     "application/json"
   ],
   "paths": {
+    "/incidents/latest": {
+  "get": {
+    "tags": [
+      "TOPdesk Incidents"
+    ],
+    "summary": "Get the latest accessible TOPdesk incident",
+    "description": "Returns the most recently created TOPdesk incident that the integration account has permission to read. Use this operation when the user asks for the latest, newest or most recently registered case, ticket or incident.",
+    "operationId": "GetLatestTopdeskIncident",
+    "responses": {
+      "200": {
+        "description": "Latest accessible incident returned successfully.",
+        "schema": {
+          "$ref": "#/definitions/Incident"
+        }
+      },
+      "404": {
+        "description": "No accessible incidents were found."
+      },
+      "500": {
+        "description": "Proxy configuration error."
+      },
+      "502": {
+        "description": "TOPdesk connection error."
+      }
+    }
+  }
+}
     "/search": {
       "get": {
         "summary": "Search TOPdesk Knowledge Base",
@@ -73,6 +100,46 @@
     }
   },
   "definitions": {
+    "Incident": {
+  "type": "object",
+  "properties": {
+    "id": {
+      "type": "string"
+    },
+    "number": {
+      "type": "string"
+    },
+    "briefDescription": {
+      "type": "string"
+    },
+    "request": {
+      "type": "string"
+    },
+    "creationDate": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "modificationDate": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "status": {
+      "type": "object"
+    },
+    "priority": {
+      "type": "object"
+    },
+    "caller": {
+      "type": "object"
+    },
+    "operator": {
+      "type": "object"
+    },
+    "operatorGroup": {
+      "type": "object"
+    }
+  }
+}
     "KnowledgeItem": {
       "type": "object",
       "properties": {
