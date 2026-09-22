@@ -31,6 +31,11 @@ TOPDESK_BASE_URL = (
     "services/knowledge-base-v1"
 )
 
+TOPDESK_INCIDENT_BASE_URL = (
+    "https://saether.topdesk.net/"
+"tas/api"
+)
+
 REQUEST_TIMEOUT = 30
 DEFAULT_PAGE_SIZE = 100
 MAX_PAGE_SIZE = 1000
@@ -184,24 +189,24 @@ def transform_item(item):
 # TOPdesk HTTP client
 # ---------------------------------------------------------
 
-def topdesk_get(path, params=None):
+def topdesk_incident_get(path, params=None):
     missing = get_missing_configuration()
 
     if missing:
         raise RuntimeError(
-            "Missing environment variables: " + ", ".join(missing)
+            "Missing environment variables: "
+            + ", ".join(missing)
         )
 
     response = requests.get(
-        f"{TOPDESK_BASE_URL}{path}",
+        f"{TOPDESK_INCIDENT_BASE_URL}{path}",
         params=params,
-        auth=(TOPDESK_USER, TOPDESK_TOKEN),
+        auth=(
+            TOPDESK_USER,
+            TOPDESK_TOKEN
+        ),
         headers={
-            "Accept": (
-                "application/x.topdesk-kb-ki-list-v1+json, "
-                "application/x.topdesk-kb-ki-v1+json, "
-                "application/json"
-            )
+            "Accept": "application/json"
         },
         timeout=REQUEST_TIMEOUT
     )
@@ -298,6 +303,85 @@ def health():
         "status": "ok",
         "service": "TOPdesk Knowledge Base Proxy"
     })
+
+@app.get("/incidents/latest")
+def get_latest_incident():
+    try:
+        data = topdesk_incident_get(
+            "/incidents",
+            params={
+                "pageStart": 0,
+                "pageSize": 1,
+                "sort": "creationDate:desc",
+                "dateFormat": "iso8601"
+            }
+        )
+
+        if not data:
+            return jsonify({
+                "message": (
+                    "No accessible incidents were found."
+                )
+            }), 404
+
+        incident = data[0]
+
+        return jsonify({
+            "id": incident.get("id", ""),
+            "number": incident.get("number", ""),
+            "briefDescription": incident.get(
+                "briefDescription",
+                ""
+            ),
+            "request": clean_html(
+                incident.get("request", "")
+            ),
+            "creationDate": incident.get(
+                "creationDate",
+                ""
+            ),
+            "modificationDate": incident.get(
+                "modificationDate",
+                ""
+            ),
+            "status": incident.get("status", {}),
+            "priority": incident.get("priority", {}),
+            "caller": incident.get("caller", {}),
+            "operator": incident.get("operator", {}),
+            "operatorGroup": incident.get(
+                "operatorGroup",
+                {}
+            )
+        })
+
+    except requests.HTTPError as error:
+        status_code = (
+            error.response.status_code
+            if error.response is not None
+            else 502
+        )
+
+        return jsonify({
+            "error": "TOPdesk incident request failed",
+            "statusCode": status_code,
+            "message": (
+                error.response.text
+                if error.response is not None
+                else str(error)
+            )
+        }), status_code
+
+    except requests.RequestException as error:
+        return jsonify({
+            "error": "TOPdesk connection failed",
+            "message": str(error)
+        }), 502
+
+    except RuntimeError as error:
+        return jsonify({
+            "error": "Configuration error",
+            "message": str(error)
+        }), 500
 
 
 # ---------------------------------------------------------
