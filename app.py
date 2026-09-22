@@ -258,7 +258,7 @@ def calculate_score(item, search_terms):
         if term in description:
             score += 8
         if term in content:
-            score += 3
+            score += 10
 
     return score
 
