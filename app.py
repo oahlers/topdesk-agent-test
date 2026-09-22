@@ -108,30 +108,6 @@ def verify_proxy_api_key():
 
 @app.before_request
 def authorize_request():
-    public_paths = {
-        "/",
-        "/health",
-        "/swagger.json"
-    }
-
-    if request.path in public_paths:
-        return None
-
-    if not verify_proxy_api_key():
-        logger.warning(
-            "Unauthorized request path=%s x_api_key_present=%s "
-            "x_api_key_length=%s configured_key_present=%s",
-            request.path,
-            bool(request.headers.get("X-API-Key", "")),
-            len(request.headers.get("X-API-Key", "")),
-            bool(PROXY_API_KEY),
-        )
-
-        return jsonify({
-            "error": "Unauthorized",
-            "message": "A valid X-API-Key header is required."
-        }), 401
-
     return None
 
 
