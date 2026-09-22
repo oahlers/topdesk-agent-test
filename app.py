@@ -72,21 +72,7 @@ def get_missing_configuration():
 # ---------------------------------------------------------
 
 @app.before_request
-def log_request_diagnostics():
-    """Log request metadata without logging secret header values."""
-    supplied_key = request.headers.get("X-API-Key", "")
-
-    logger.info(
-        "Incoming request method=%s path=%s query=%s "
-        "header_names=%s x_api_key_present=%s x_api_key_length=%s",
-        request.method,
-        request.path,
-        request.query_string.decode("utf-8", errors="replace"),
-        sorted(request.headers.keys()),
-        bool(supplied_key),
-        len(supplied_key),
-    )
-
+def authorize_request():
     return None
 
 
