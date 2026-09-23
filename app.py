@@ -1,811 +1,419 @@
 from flask import Flask, jsonify, request
 import html
+import json
 import logging
 import os
 import re
+from urllib.parse import quote
 
 import requests
 
-
 app = Flask(__name__)
 logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger("topdesk-proxy")
-
-
-# ---------------------------------------------------------
-# Environment variables
-# ---------------------------------------------------------
+logger = logging.getLogger("topdesk-proxy-v3")
 
 TOPDESK_USER = os.getenv("TOPDESK_USER")
 TOPDESK_TOKEN = os.getenv("TOPDESK_TOKEN")
+TOPDESK_HOST = os.getenv("TOPDESK_HOST", "https://saether.topdesk.net").rstrip("/")
+PROXY_API_KEY = os.getenv("PROXY_API_KEY", "")
+REQUEST_TIMEOUT = int(os.getenv("REQUEST_TIMEOUT", "30"))
 
+KB_BASE = f"{TOPDESK_HOST}/services/knowledge-base-v1"
+GENERAL_BASE = f"{TOPDESK_HOST}/tas/api"
+SERVICES_BASE = f"{TOPDESK_HOST}/services/service-v1"
 
-# ---------------------------------------------------------
-# Configuration
-# ---------------------------------------------------------
-
-TOPDESK_KNOWLEDGE_BASE_URL = (
-    "https://saether.topdesk.net/"
-    "services/knowledge-base-v1"
-)
-
-TOPDESK_INCIDENT_BASE_URL = (
-    "https://saether.topdesk.net/"
-    "tas/api"
-)
-
-REQUEST_TIMEOUT = 30
-DEFAULT_PAGE_SIZE = 100
-MAX_PAGE_SIZE = 1000
-DEFAULT_RESULT_LIMIT = 10
-MAX_RESULT_LIMIT = 25
-
-FIELDS = (
-    "title,"
-    "description,"
-    "content,"
-    "keywords,"
-    "urls,"
-    "modificationDate,"
+KB_FIELDS = (
+    "title,description,content,keywords,urls,modificationDate,"
     "availableTranslations"
 )
+INCIDENT_FIELDS = (
+    "id,number,briefDescription,request,action,creationDate,modificationDate,"
+    "targetDate,closedDate,status,caller,operator,operatorGroup,category,"
+    "subcategory,callType,priority,urgency,impact,branch,location,object"
+)
 
 
-# ---------------------------------------------------------
-# Configuration validation
-# ---------------------------------------------------------
-
-def get_missing_configuration():
-    missing = []
-
-    if not TOPDESK_USER:
-        missing.append("TOPDESK_USER")
-
-    if not TOPDESK_TOKEN:
-        missing.append("TOPDESK_TOKEN")
-
-    return missing
-
-
-# ---------------------------------------------------------
-# Request diagnostics
-# ---------------------------------------------------------
-
-@app.before_request
-def log_request_diagnostics():
-    logger.info(
-        "Incoming request method=%s path=%s query=%s header_names=%s",
-        request.method,
-        request.path,
-        request.query_string.decode("utf-8", errors="replace"),
-        sorted(request.headers.keys()),
-    )
-
+def require_proxy_key():
+    if not PROXY_API_KEY:
+        return None
+    supplied = request.headers.get("X-API-Key", "")
+    if supplied != PROXY_API_KEY:
+        return jsonify({"error": "Unauthorized", "message": "Missing or invalid X-API-Key."}), 401
     return None
 
 
-# ---------------------------------------------------------
-# HTML cleaning
-# ---------------------------------------------------------
+@app.before_request
+def before_request():
+    logger.info("%s %s query=%s", request.method, request.path, request.query_string.decode("utf-8", errors="replace"))
+    if request.path in {"/", "/health", "/swagger.json"}:
+        return None
+    return require_proxy_key()
+
+
+def validate_config():
+    missing = []
+    if not TOPDESK_USER:
+        missing.append("TOPDESK_USER")
+    if not TOPDESK_TOKEN:
+        missing.append("TOPDESK_TOKEN")
+    if missing:
+        raise RuntimeError("Missing environment variables: " + ", ".join(missing))
+
 
 def clean_html(value):
-    if not value:
+    if value is None:
         return ""
-
     text = html.unescape(str(value))
-
-    text = re.sub(
-        r"<\s*br\s*/?\s*>",
-        "\n",
-        text,
-        flags=re.IGNORECASE
-    )
-
-    text = re.sub(
-        r"</\s*(p|div|li|ol|ul|h[1-6])\s*>",
-        "\n",
-        text,
-        flags=re.IGNORECASE
-    )
-
-    text = re.sub(
-        r"<\s*img\b[^>]*>",
-        "",
-        text,
-        flags=re.IGNORECASE
-    )
-
+    text = re.sub(r"<\s*br\s*/?\s*>", "\n", text, flags=re.I)
+    text = re.sub(r"</\s*(p|div|li|ol|ul|h[1-6])\s*>", "\n", text, flags=re.I)
+    text = re.sub(r"<\s*img\b[^>]*>", "", text, flags=re.I)
     text = re.sub(r"<[^>]+>", "", text)
     text = html.unescape(text)
     text = re.sub(r"[ \t]+", " ", text)
     text = re.sub(r"\n\s*\n+", "\n\n", text)
-
     return text.strip()
 
 
-# ---------------------------------------------------------
-# TOPdesk data transformation
-# ---------------------------------------------------------
+def scalar(value):
+    if isinstance(value, dict):
+        return str(value.get("name") or value.get("value") or value.get("id") or "")
+    return str(value or "")
 
-def get_translation_content(item):
-    return (
-        item
-        .get("translation", {})
-        .get("content", {})
+
+def topdesk_get(base, path, params=None, accept="application/json"):
+    validate_config()
+    response = requests.get(
+        f"{base}{path}",
+        params=params,
+        auth=(TOPDESK_USER, TOPDESK_TOKEN),
+        headers={"Accept": accept},
+        timeout=REQUEST_TIMEOUT,
+    )
+    response.raise_for_status()
+    if not response.content:
+        return {}
+    return response.json()
+
+
+def kb_get(path, params=None):
+    return topdesk_get(
+        KB_BASE,
+        path,
+        params=params,
+        accept=(
+            "application/x.topdesk-kb-ki-list-v1+json, "
+            "application/x.topdesk-kb-ki-v1+json, application/json"
+        ),
     )
 
 
-def transform_item(item):
-    translation_content = get_translation_content(item)
+def general_get(path, params=None):
+    return topdesk_get(GENERAL_BASE, path, params=params)
 
+
+def services_get(path, params=None):
+    return topdesk_get(SERVICES_BASE, path, params=params)
+
+
+def error_response(error, label):
+    status = error.response.status_code if getattr(error, "response", None) is not None else 502
+    message = error.response.text if getattr(error, "response", None) is not None else str(error)
+    return jsonify({"error": label, "statusCode": status, "message": message}), status
+
+
+def safe_endpoint(func):
+    try:
+        return func()
+    except requests.HTTPError as error:
+        return error_response(error, "TOPdesk request failed")
+    except requests.RequestException as error:
+        return jsonify({"error": "TOPdesk connection failed", "message": str(error)}), 502
+    except RuntimeError as error:
+        return jsonify({"error": "Configuration error", "message": str(error)}), 500
+
+
+def translation_content(item):
+    return item.get("translation", {}).get("content", {})
+
+
+def transform_knowledge(item):
+    content = translation_content(item)
     return {
-        "id": item.get("id", ""),
-        "number": item.get("number", ""),
-        "title": clean_html(
-            translation_content.get("title", "")
-        ),
-        "description": clean_html(
-            translation_content.get("description", "")
-        ),
-        "content": clean_html(
-            translation_content.get("content", "")
-        ),
-        "keywords": clean_html(
-            translation_content.get("keywords", "")
-        ),
-        "urls": item.get("urls", {}),
-        "modificationDate": item.get(
-            "modificationDate",
-            ""
-        ),
-        "availableTranslations": item.get(
-            "availableTranslations",
-            []
-        )
+        "id": str(item.get("id") or ""),
+        "number": str(item.get("number") or ""),
+        "title": clean_html(content.get("title", "")),
+        "description": clean_html(content.get("description", "")),
+        "content": clean_html(content.get("content", "")),
+        "keywords": clean_html(content.get("keywords", "")),
+        "modificationDate": str(item.get("modificationDate") or ""),
+        "availableTranslations": item.get("availableTranslations") or [],
+        "urls": item.get("urls") or {},
     }
 
 
-# ---------------------------------------------------------
-# TOPdesk HTTP clients
-# ---------------------------------------------------------
+def transform_incident(item):
+    transformed = {
+        "id": str(item.get("id") or ""),
+        "number": str(item.get("number") or ""),
+        "briefDescription": clean_html(item.get("briefDescription", "")),
+        "request": clean_html(item.get("request", "")),
+        "action": clean_html(item.get("action", "")),
+        "creationDate": str(item.get("creationDate") or ""),
+        "modificationDate": str(item.get("modificationDate") or ""),
+        "targetDate": str(item.get("targetDate") or ""),
+        "closedDate": str(item.get("closedDate") or ""),
+    }
+    for name in (
+        "status", "caller", "operator", "operatorGroup", "category", "subcategory",
+        "callType", "priority", "urgency", "impact", "branch", "location", "object"
+    ):
+        transformed[name] = scalar(item.get(name))
+    return transformed
 
-def topdesk_get(path, params=None):
-    missing = get_missing_configuration()
 
-    if missing:
-        raise RuntimeError(
-            "Missing environment variables: "
-            + ", ".join(missing)
-        )
+def extract_list(data):
+    if isinstance(data, list):
+        return data
+    if isinstance(data, dict):
+        for key in ("results", "items", "item", "data"):
+            if isinstance(data.get(key), list):
+                return data[key]
+    return []
 
-    response = requests.get(
-        f"{TOPDESK_KNOWLEDGE_BASE_URL}{path}",
-        params=params,
-        auth=(TOPDESK_USER, TOPDESK_TOKEN),
-        headers={
-            "Accept": (
-                "application/"
-                "x.topdesk-kb-ki-list-v1+json, "
-                "application/"
-                "x.topdesk-kb-ki-v1+json, "
-                "application/json"
-            )
-        },
-        timeout=REQUEST_TIMEOUT
+
+def tokenize(query):
+    return [part.lower() for part in re.findall(r"[\wæøåÆØÅ-]+", query or "") if len(part) > 1]
+
+
+def incident_score(item, terms):
+    weighted = (
+        (item.get("number", "").lower(), 100),
+        (item.get("briefDescription", "").lower(), 30),
+        (item.get("request", "").lower(), 20),
+        (item.get("action", "").lower(), 12),
+        (item.get("category", "").lower(), 10),
+        (item.get("subcategory", "").lower(), 10),
+        (item.get("status", "").lower(), 8),
+        (item.get("caller", "").lower(), 6),
+        (item.get("operator", "").lower(), 6),
+        (item.get("operatorGroup", "").lower(), 6),
     )
-
-    response.raise_for_status()
-    return response.json()
+    return sum(weight for term in terms for text, weight in weighted if term in text)
 
 
-def topdesk_incident_get(path, params=None):
-    missing = get_missing_configuration()
-
-    if missing:
-        raise RuntimeError(
-            "Missing environment variables: "
-            + ", ".join(missing)
-        )
-
-    response = requests.get(
-        f"{TOPDESK_INCIDENT_BASE_URL}{path}",
-        params=params,
-        auth=(TOPDESK_USER, TOPDESK_TOKEN),
-        headers={
-            "Accept": "application/json"
-        },
-        timeout=REQUEST_TIMEOUT
+def knowledge_score(item, terms):
+    weighted = (
+        (item.get("number", "").lower(), 100),
+        (item.get("title", "").lower(), 25),
+        (item.get("keywords", "").lower(), 20),
+        (item.get("description", "").lower(), 12),
+        (item.get("content", "").lower(), 8),
     )
+    return sum(weight for term in terms for text, weight in weighted if term in text)
 
-    response.raise_for_status()
-    return response.json()
-
-
-def get_all_knowledge_items():
-    all_items = []
-    start = 0
-
-    while True:
-        data = topdesk_get(
-            "/knowledgeItems",
-            params={
-                "start": start,
-                "page_size": MAX_PAGE_SIZE,
-                "fields": FIELDS
-            }
-        )
-
-        page_items = data.get("item", [])
-        all_items.extend(page_items)
-
-        if not data.get("next") or not page_items:
-            break
-
-        start += len(page_items)
-
-    return all_items
-
-
-# ---------------------------------------------------------
-# Search scoring
-# ---------------------------------------------------------
-
-def calculate_score(item, search_terms):
-    title = item.get("title", "").lower()
-    description = item.get("description", "").lower()
-    content = item.get("content", "").lower()
-    keywords = item.get("keywords", "").lower()
-    number = item.get("number", "").lower()
-
-    score = 0
-
-    for term in search_terms:
-        if term in number:
-            score += 100
-
-        if term in title:
-            score += 20
-
-        if term in keywords:
-            score += 15
-
-        if term in description:
-            score += 8
-
-        if term in content:
-            score += 10
-
-    return score
-
-
-# ---------------------------------------------------------
-# Shared error handling
-# ---------------------------------------------------------
-
-def topdesk_http_error_response(error, label):
-    status_code = (
-        error.response.status_code
-        if error.response is not None
-        else 502
-    )
-
-    response_text = (
-        error.response.text
-        if error.response is not None
-        else str(error)
-    )
-
-    return jsonify({
-        "error": label,
-        "statusCode": status_code,
-        "message": response_text
-    }), status_code
-
-
-# ---------------------------------------------------------
-# Public endpoints
-# ---------------------------------------------------------
 
 @app.get("/")
 def home():
     return jsonify({
         "status": "ok",
-        "service": "TOPdesk Knowledge Base and Incident Proxy",
-        "description": (
-            "Provides live search and retrieval of TOPdesk "
-            "Knowledge Items and the latest accessible incident."
-        ),
-        "endpoints": {
-            "health": "/health",
-            "search": "/search?q=helpdesk",
-            "specificItem": "/knowledge-items/KI%200080",
-            "latestIncident": "/incidents/latest",
-            "swagger": "/swagger.json"
-        }
+        "service": "TOPdesk Copilot Proxy V3",
+        "version": "3.0.0",
+        "swagger": "/swagger.json",
     })
 
 
 @app.get("/health")
 def health():
-    missing = get_missing_configuration()
-
-    if missing:
-        return jsonify({
-            "status": "configuration_error",
-            "missingVariables": missing
-        }), 500
-
-    return jsonify({
-        "status": "ok",
-        "service": "TOPdesk Knowledge Base and Incident Proxy"
-    })
+    missing = []
+    if not TOPDESK_USER:
+        missing.append("TOPDESK_USER")
+    if not TOPDESK_TOKEN:
+        missing.append("TOPDESK_TOKEN")
+    return jsonify({"status": "ok" if not missing else "configuration_error", "missingVariables": missing}), 200 if not missing else 500
 
 
-# ---------------------------------------------------------
-# Latest Incident
-# ---------------------------------------------------------
-
-@app.get("/incidents/latest")
-def get_latest_incident():
-    try:
-        data = topdesk_incident_get(
-            "/incidents",
-            params={
-                "pageStart": 0,
-                "pageSize": 1,
-                "sort": "creationDate:desc",
-                "dateFormat": "iso8601",
-                "fields": (
-                    "id,number,briefDescription,"
-                    "creationDate,modificationDate,status"
-                )
-            }
-        )
-
-        if not data:
-            return jsonify({
-                "message": "No accessible incidents were found."
-            }), 404
-
-        incident = data[0]
-
-        return jsonify({
-            "id": incident.get("id", ""),
-            "number": incident.get("number", ""),
-            "briefDescription": clean_html(
-                incident.get("briefDescription", "")
-            ),
-            "creationDate": incident.get(
-                "creationDate",
-                ""
-            ),
-            "modificationDate": incident.get(
-                "modificationDate",
-                ""
-            ),
-            "status": incident.get("status", "")
-        })
-
-    except requests.HTTPError as error:
-        return topdesk_http_error_response(
-            error,
-            "TOPdesk incident request failed"
-        )
-
-    except requests.RequestException as error:
-        return jsonify({
-            "error": "TOPdesk connection failed",
-            "message": str(error)
-        }), 502
-
-    except RuntimeError as error:
-        return jsonify({
-            "error": "Configuration error",
-            "message": str(error)
-        }), 500
-
-
-# ---------------------------------------------------------
-# List Knowledge Items
-# ---------------------------------------------------------
-
-@app.get("/knowledge-items")
-def list_knowledge_items():
-    try:
-        page_size = request.args.get(
-            "page_size",
-            DEFAULT_PAGE_SIZE,
-            type=int
-        )
-        start = request.args.get("start", 0, type=int)
-
-        page_size = max(1, min(page_size, MAX_PAGE_SIZE))
-        start = max(0, start)
-
-        data = topdesk_get(
-            "/knowledgeItems",
-            params={
-                "start": start,
-                "page_size": page_size,
-                "fields": FIELDS
-            }
-        )
-
-        items = [
-            transform_item(item)
-            for item in data.get("item", [])
-        ]
-
-        return jsonify({
-            "items": items,
-            "count": len(items),
-            "start": start,
-            "pageSize": page_size,
-            "hasNextPage": bool(data.get("next"))
-        })
-
-    except requests.HTTPError as error:
-        return topdesk_http_error_response(
-            error,
-            "TOPdesk request failed"
-        )
-
-    except requests.RequestException as error:
-        return jsonify({
-            "error": "TOPdesk connection failed",
-            "message": str(error)
-        }), 502
-
-    except RuntimeError as error:
-        return jsonify({
-            "error": "Configuration error",
-            "message": str(error)
-        }), 500
-
-
-# ---------------------------------------------------------
-# Get one specific Knowledge Item
-# ---------------------------------------------------------
-
-@app.get("/knowledge-items/<path:identifier>")
-def get_knowledge_item(identifier):
-    try:
-        data = topdesk_get(
-            f"/knowledgeItems/{identifier}",
-            params={"fields": FIELDS}
-        )
-
-        return jsonify(transform_item(data))
-
-    except requests.HTTPError as error:
-        return topdesk_http_error_response(
-            error,
-            "TOPdesk request failed"
-        )
-
-    except requests.RequestException as error:
-        return jsonify({
-            "error": "TOPdesk connection failed",
-            "message": str(error)
-        }), 502
-
-    except RuntimeError as error:
-        return jsonify({
-            "error": "Configuration error",
-            "message": str(error)
-        }), 500
-
-
-# ---------------------------------------------------------
-# Search Knowledge Items
-# ---------------------------------------------------------
-
-@app.get("/search")
-def search_knowledge_items():
-    query = request.args.get("q", "").strip()
-    limit = request.args.get(
-        "limit",
-        DEFAULT_RESULT_LIMIT,
-        type=int
-    )
-    limit = max(1, min(limit, MAX_RESULT_LIMIT))
-
-    if not query:
-        return jsonify({
-            "error": "Missing query",
-            "message": "Supply a search term with the q parameter."
-        }), 400
-
-    search_terms = [
-        term.lower()
-        for term in query.split()
-        if term.strip()
-    ]
-
-    try:
-        raw_items = get_all_knowledge_items()
-        transformed_items = [
-            transform_item(item)
-            for item in raw_items
-        ]
-
-        scored_items = []
-
-        for item in transformed_items:
-            score = calculate_score(item, search_terms)
-
+@app.get("/knowledge/search")
+def search_knowledge():
+    def run():
+        query = request.args.get("query", "").strip()
+        limit = max(1, min(request.args.get("limit", 7, type=int), 10))
+        if not query:
+            return jsonify({"error": "Missing query", "message": "Supply query."}), 400
+        data = kb_get("/knowledgeItems", params={"start": 0, "page_size": 1000, "fields": KB_FIELDS})
+        items = [transform_knowledge(item) for item in extract_list(data)]
+        terms = tokenize(query)
+        results = []
+        for item in items:
+            score = knowledge_score(item, terms)
             if score > 0:
-                result = dict(item)
-                result["score"] = score
-                scored_items.append(result)
-
-        scored_items.sort(
-            key=lambda current_item: current_item["score"],
-            reverse=True
-        )
-
-        results = scored_items[:limit]
-
-        return jsonify({
-            "query": query,
-            "results": results,
-            "resultCount": len(results)
-        })
-
-    except requests.HTTPError as error:
-        return topdesk_http_error_response(
-            error,
-            "TOPdesk request failed"
-        )
-
-    except requests.RequestException as error:
-        return jsonify({
-            "error": "TOPdesk connection failed",
-            "message": str(error)
-        }), 502
-
-    except RuntimeError as error:
-        return jsonify({
-            "error": "Configuration error",
-            "message": str(error)
-        }), 500
+                item["relevanceScore"] = score
+                results.append(item)
+        results.sort(key=lambda x: (x["relevanceScore"], x.get("modificationDate", "")), reverse=True)
+        return jsonify({"query": query, "count": len(results[:limit]), "references": results[:limit]})
+    return safe_endpoint(run)
 
 
-# ---------------------------------------------------------
-# Swagger 2.0 definition for Copilot Studio
-# ---------------------------------------------------------
+@app.get("/knowledge/items")
+def list_knowledge_items():
+    def run():
+        start = max(0, request.args.get("start", 0, type=int))
+        page_size = max(1, min(request.args.get("pageSize", 25, type=int), 1000))
+        data = kb_get("/knowledgeItems", params={"start": start, "page_size": page_size, "fields": KB_FIELDS})
+        items = [transform_knowledge(item) for item in extract_list(data)]
+        return jsonify({"count": len(items), "start": start, "pageSize": page_size, "items": items, "hasNextPage": bool(data.get("next")) if isinstance(data, dict) else False})
+    return safe_endpoint(run)
+
+
+@app.get("/knowledge/items/<path:identifier>")
+def get_knowledge_item(identifier):
+    return safe_endpoint(lambda: jsonify(transform_knowledge(kb_get(f"/knowledgeItems/{quote(identifier, safe='')}" , params={"fields": KB_FIELDS}))))
+
+
+@app.get("/knowledge/statuses")
+def knowledge_statuses():
+    return safe_endpoint(lambda: jsonify(kb_get("/knowledgeItemStatuses")))
+
+
+@app.get("/knowledge/explorer-migrated")
+def explorer_migrated():
+    return safe_endpoint(lambda: jsonify(kb_get("/explorer/migrated")))
+
+
+@app.get("/incidents")
+def list_incidents():
+    def run():
+        start = max(0, request.args.get("start", 0, type=int))
+        limit = max(1, min(request.args.get("limit", 10, type=int), 100))
+        status = request.args.get("status", "").strip().lower()
+        data = general_get("/incidents", params={"pageStart": start, "pageSize": limit, "sort": "creationDate:desc", "dateFormat": "iso8601", "fields": INCIDENT_FIELDS})
+        items = [transform_incident(i) for i in extract_list(data)]
+        if status:
+            items = [i for i in items if status in i.get("status", "").lower()]
+        return jsonify({"count": len(items), "start": start, "limit": limit, "incidents": items})
+    return safe_endpoint(run)
+
+
+@app.get("/incidents/search")
+def search_incidents():
+    def run():
+        query = request.args.get("query", "").strip()
+        limit = max(5, min(request.args.get("limit", 7, type=int), 10))
+        scan = max(25, min(request.args.get("scan", 250, type=int), 1000))
+        if not query:
+            return jsonify({"error": "Missing query", "message": "Supply query."}), 400
+        data = general_get("/incidents", params={"pageStart": 0, "pageSize": scan, "sort": "creationDate:desc", "dateFormat": "iso8601", "fields": INCIDENT_FIELDS})
+        incidents = [transform_incident(i) for i in extract_list(data)]
+        terms = tokenize(query)
+        results = []
+        for incident in incidents:
+            score = incident_score(incident, terms)
+            if score > 0:
+                incident["relevanceScore"] = score
+                results.append(incident)
+        results.sort(key=lambda x: (x["relevanceScore"], x.get("creationDate", "")), reverse=True)
+        return jsonify({"query": query, "scanned": len(incidents), "count": len(results[:limit]), "references": results[:limit]})
+    return safe_endpoint(run)
+
+
+@app.get("/incidents/id/<path:incident_id>")
+def get_incident_by_id(incident_id):
+    return safe_endpoint(lambda: jsonify(transform_incident(general_get(f"/incidents/id/{quote(incident_id, safe='')}" , params={"dateFormat": "iso8601"}))))
+
+
+@app.get("/incidents/number/<path:number>")
+def get_incident_by_number(number):
+    return safe_endpoint(lambda: jsonify(transform_incident(general_get(f"/incidents/number/{quote(number, safe='')}" , params={"dateFormat": "iso8601"}))))
+
+
+def lookup(path):
+    return safe_endpoint(lambda: jsonify(general_get(path)))
+
+
+@app.get("/lookups/incidents/statuses")
+def incident_statuses(): return lookup("/incidents/statuses")
+@app.get("/lookups/incidents/categories")
+def incident_categories(): return lookup("/incidents/categories")
+@app.get("/lookups/incidents/subcategories")
+def incident_subcategories(): return lookup("/incidents/subcategories")
+@app.get("/lookups/incidents/priorities")
+def incident_priorities(): return lookup("/incidents/priorities")
+@app.get("/lookups/incidents/urgencies")
+def incident_urgencies(): return lookup("/incidents/urgencies")
+@app.get("/lookups/incidents/impacts")
+def incident_impacts(): return lookup("/incidents/impacts")
+@app.get("/lookups/incidents/call-types")
+def incident_call_types(): return lookup("/incidents/call_types")
+@app.get("/lookups/incidents/entry-types")
+def incident_entry_types(): return lookup("/incidents/entry_types")
+@app.get("/lookups/incidents/durations")
+def incident_durations(): return lookup("/incidents/durations")
+@app.get("/lookups/incidents/operator-groups")
+def incident_operator_groups(): return lookup("/incidents/operatorgroups/lookup")
+@app.get("/lookups/incidents/operators")
+def incident_operators(): return lookup("/incidents/operators/lookup")
+@app.get("/lookups/incidents/callers")
+def incident_callers(): return lookup("/incidents/callers/lookup")
+@app.get("/lookups/incidents/closure-codes")
+def incident_closure_codes(): return lookup("/incidents/closure_codes")
+@app.get("/lookups/incidents/slas")
+def incident_slas(): return lookup("/incidents/slas")
+
+
+@app.get("/general/search")
+def general_search():
+    def run():
+        params = {k: v for k, v in request.args.items() if k in {"query", "pageStart", "pageSize", "sort"}}
+        return jsonify(general_get("/search", params=params))
+    return safe_endpoint(run)
+
+
+@app.get("/general/archiving-reasons")
+def archiving_reasons(): return lookup("/archiving-reasons")
+@app.get("/general/timespent-reasons")
+def timespent_reasons(): return lookup("/timespent-reasons")
+@app.get("/general/version")
+def api_version(): return lookup("/version")
+@app.get("/general/product-version")
+def product_version(): return lookup("/productVersion")
+@app.get("/general/categories")
+def general_categories(): return lookup("/categories")
+@app.get("/general/requester-categories")
+def requester_categories(): return lookup("/requester/categories")
+@app.get("/general/service-windows")
+def service_windows(): return lookup("/serviceWindow/lookup")
+@app.get("/general/service-windows/<path:window_id>")
+def service_window(window_id): return lookup(f"/serviceWindow/lookup/{quote(window_id, safe='')}")
+@app.get("/general/emails/<path:email_id>")
+def get_email(email_id): return lookup(f"/emails/id/{quote(email_id, safe='')}")
+
+
+@app.get("/services")
+def list_services():
+    def run():
+        return jsonify(services_get("/services", params=dict(request.args)))
+    return safe_endpoint(run)
+
+
+@app.get("/services/<path:service_id>")
+def get_service(service_id):
+    return safe_endpoint(lambda: jsonify(services_get(f"/services/{quote(service_id, safe='')}")))
+
+
+@app.get("/services/<path:service_id>/linked-assets")
+def linked_assets(service_id):
+    return safe_endpoint(lambda: jsonify(services_get(f"/services/{quote(service_id, safe='')}/linkedAssets")))
+
 
 @app.get("/swagger.json")
-def swagger():
-    return jsonify({
-        "swagger": "2.0",
-        "info": {
-            "title": "TOPdesk Knowledge Base and Incidents Proxy",
-            "description": (
-                "Searches and retrieves live TOPdesk Knowledge Base "
-                "articles and the latest accessible TOPdesk incident."
-            ),
-            "version": "3.0.0"
-        },
-        "host": "topdesk-agent-test.onrender.com",
-        "schemes": ["https"],
-        "produces": ["application/json"],
-        "paths": {
-            "/search": {
-                "get": {
-                    "summary": "Search TOPdesk Knowledge Base",
-                    "description": (
-                        "Searches Knowledge Item numbers, titles, "
-                        "descriptions, article content and keywords."
-                    ),
-                    "operationId": "SearchTopdeskKnowledgeItems",
-                    "parameters": [
-                        {
-                            "name": "q",
-                            "in": "query",
-                            "description": (
-                                "Search words or a Knowledge Item number."
-                            ),
-                            "required": True,
-                            "type": "string"
-                        },
-                        {
-                            "name": "limit",
-                            "in": "query",
-                            "description": "Maximum number of results.",
-                            "required": False,
-                            "type": "integer",
-                            "default": 10,
-                            "minimum": 1,
-                            "maximum": 25
-                        }
-                    ],
-                    "responses": {
-                        "200": {
-                            "description": (
-                                "Matching TOPdesk Knowledge Items."
-                            ),
-                            "schema": {
-                                "$ref": "#/definitions/SearchResponse"
-                            }
-                        },
-                        "400": {
-                            "description": "Search query is missing."
-                        },
-                        "500": {
-                            "description": "Proxy configuration error."
-                        },
-                        "502": {
-                            "description": "TOPdesk connection error."
-                        }
-                    }
-                }
-            },
-            "/knowledge-items/{identifier}": {
-                "get": {
-                    "summary": "Get one TOPdesk Knowledge Item",
-                    "description": (
-                        "Retrieves one Knowledge Item using its UUID "
-                        "or KI number."
-                    ),
-                    "operationId": "GetTopdeskKnowledgeItem",
-                    "parameters": [
-                        {
-                            "name": "identifier",
-                            "in": "path",
-                            "description": (
-                                "Knowledge Item UUID or KI number, "
-                                "for example KI 0080."
-                            ),
-                            "required": True,
-                            "type": "string"
-                        }
-                    ],
-                    "responses": {
-                        "200": {
-                            "description": (
-                                "Requested TOPdesk Knowledge Item."
-                            ),
-                            "schema": {
-                                "$ref": "#/definitions/KnowledgeItem"
-                            }
-                        },
-                        "404": {
-                            "description": "Knowledge Item not found."
-                        },
-                        "500": {
-                            "description": "Proxy configuration error."
-                        },
-                        "502": {
-                            "description": "TOPdesk connection error."
-                        }
-                    }
-                }
-            },
-            "/incidents/latest": {
-                "get": {
-                    "summary": (
-                        "Get the latest accessible TOPdesk incident"
-                    ),
-                    "description": (
-                        "Returns the most recently created TOPdesk incident "
-                        "that the integration account is permitted to read. "
-                        "Use this when the user asks for the latest, newest "
-                        "or most recently registered case, ticket or incident."
-                    ),
-                    "operationId": "GetLatestTopdeskIncident",
-                    "responses": {
-                        "200": {
-                            "description": (
-                                "Latest accessible incident returned."
-                            ),
-                            "schema": {
-                                "$ref": "#/definitions/Incident"
-                            }
-                        },
-                        "404": {
-                            "description": (
-                                "No accessible incidents were found."
-                            )
-                        },
-                        "500": {
-                            "description": "Proxy configuration error."
-                        },
-                        "502": {
-                            "description": "TOPdesk connection error."
-                        }
-                    }
-                }
-            }
-        },
-        "definitions": {
-            "KnowledgeItem": {
-                "type": "object",
-                "properties": {
-                    "id": {"type": "string"},
-                    "number": {"type": "string"},
-                    "title": {"type": "string"},
-                    "description": {"type": "string"},
-                    "content": {"type": "string"},
-                    "keywords": {"type": "string"},
-                    "modificationDate": {"type": "string"},
-                    "availableTranslations": {
-                        "type": "array",
-                        "items": {"type": "string"}
-                    },
-                    "urls": {"type": "object"},
-                    "score": {"type": "integer"}
-                }
-            },
-            "SearchResponse": {
-                "type": "object",
-                "properties": {
-                    "query": {"type": "string"},
-                    "resultCount": {"type": "integer"},
-                    "results": {
-                        "type": "array",
-                        "items": {
-                            "$ref": "#/definitions/KnowledgeItem"
-                        }
-                    }
-                }
-            },
-            "Incident": {
-                "type": "object",
-                "properties": {
-                    "id": {"type": "string"},
-                    "number": {"type": "string"},
-                    "briefDescription": {"type": "string"},
-                    "creationDate": {
-                        "type": "string",
-                        "format": "date-time"
-                    },
-                    "modificationDate": {
-                        "type": "string",
-                        "format": "date-time"
-                    },
-                    "status": {"type": "string"}
-                }
-            },
-            "ErrorResponse": {
-                "type": "object",
-                "properties": {
-                    "error": {"type": "string"},
-                    "message": {"type": "string"},
-                    "statusCode": {"type": "integer"}
-                }
-            }
-        }
-    })
+def swagger_json():
+    with open(os.path.join(os.path.dirname(__file__), "swagger.json"), "r", encoding="utf-8") as file:
+        return jsonify(json.load(file))
 
-
-# ---------------------------------------------------------
-# Error handlers
-# ---------------------------------------------------------
 
 @app.errorhandler(404)
 def not_found(error):
-    return jsonify({
-        "error": "Not found",
-        "availableEndpoints": [
-            "/health",
-            "/search?q=helpdesk",
-            "/knowledge-items?page_size=10",
-            "/knowledge-items/KI%200080",
-            "/incidents/latest",
-            "/swagger.json"
-        ]
-    }), 404
+    return jsonify({"error": "Not found", "swagger": "/swagger.json"}), 404
 
-
-# ---------------------------------------------------------
-# Local development
-# ---------------------------------------------------------
 
 if __name__ == "__main__":
-    port = int(os.getenv("PORT", "10000"))
-
-    app.run(
-        host="0.0.0.0",
-        port=port
-    )
+    app.run(host="0.0.0.0", port=int(os.getenv("PORT", "10000")))
